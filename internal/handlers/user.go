@@ -5,16 +5,19 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"sample-miniapp-backend/internal/models"
 	"sample-miniapp-backend/internal/services"
 )
 
 type UserHandler struct {
 	redisService *services.RedisService
+	gameEngine   *services.GameEngine
 }
 
-func NewUserHandler(redisService *services.RedisService) *UserHandler {
+func NewUserHandler(redisService *services.RedisService, gameEngine *services.GameEngine) *UserHandler {
 	return &UserHandler{
 		redisService: redisService,
+		gameEngine:   gameEngine,
 	}
 }
 
@@ -37,12 +40,27 @@ func (h *UserHandler) GetCurrentUser(c *gin.Context) {
 		return
 	}
 
+	wallet, err := h.redisService.GetWallet(userID.(int64))
+	if err != nil {
+		wallet = &models.Wallet{
+			UserID:  userID.(int64),
+			Balance: wallet.Balance,
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"user": session.TelegramUser,
 		"session": gin.H{
 			"session_id":    session.SessionID,
 			"created_at":    session.CreatedAt,
 			"last_accessed": session.LastAccessed,
+		},
+		"wallet": gin.H{
+			"balance":       wallet.Balance,
+			"locked":        wallet.LockedBalance,
+			"available":     wallet.Balance - wallet.LockedBalance,
+			"total_wagered": wallet.TotalWagered,
+			"total_won":     wallet.TotalWon,
 		},
 	})
 }

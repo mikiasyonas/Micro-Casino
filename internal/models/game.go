@@ -26,10 +26,11 @@ type GameSession struct {
 	Nonce      int64  `json:"nonce" redis:"nonce"`
 	FinalHash  string `json:"final_hash" redis:"final_hash"`
 
-	Status    string    `json:"status" redis:"status"` // active, cashed_out, crashed, completed
-	CreatedAt time.Time `json:"created_at" redis:"created_at"`
-	UpdatedAt time.Time `json:"updated_at" redis:"updated_at"`
-	EndedAt   time.Time `json:"ended_at" redis:"ended_at"`
+	Status    string                 `json:"status" redis:"status"` // active, cashed_out, crashed, completed
+	CreatedAt time.Time              `json:"created_at" redis:"created_at"`
+	UpdatedAt time.Time              `json:"updated_at" redis:"updated_at"`
+	EndedAt   time.Time              `json:"ended_at" redis:"ended_at"`
+	Metadata  map[string]interface{} `json:"metadata" redis:"metadata"`
 }
 
 type BetRequest struct {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -30,8 +31,21 @@ func main() {
 
 	jwtService := services.NewJWTService(cfg)
 
+	gameEngine := services.NewGameEngine(redisService)
+	wsHandler := handlers.NewWebSocketHandler(gameEngine)
+
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			gameEngine.CleanupStaleGames(10 * time.Minute)
+		}
+	}()
+
 	authHandler := handlers.NewAuthHandler(redisService, jwtService, cfg.BotToken)
-	userHandler := handlers.NewUserHandler(redisService)
+	userHandler := handlers.NewUserHandler(redisService, gameEngine)
+	gameHandler := handlers.NewGameHandler(gameEngine, redisService)
 
 	if cfg.Env == "production" {
 		gin.SetMode(gin.ReleaseMode)
@@ -59,6 +73,31 @@ func main() {
 	{
 		protected.GET("/me", userHandler.GetCurrentUser)
 		protected.POST("/logout", userHandler.Logout)
+
+		protected.GET("/ws", wsHandler.HandleWebSocket)
+
+		games := protected.Group("/games")
+		{
+			games.POST("/bet", gameHandler.PlaceBet)
+			games.POST("/cashout", gameHandler.Cashout)
+			games.GET("/balance", gameHandler.GetBalance)
+			games.GET("/active", gameHandler.GetActiveGames)
+			games.GET("/history", gameHandler.GetGameHistory)
+
+			games.GET("/verification", gameHandler.GetVerificationData)
+			games.POST("/verify", gameHandler.VerifyGame)
+
+			mines := games.Group("/mines")
+			{
+				mines.POST("/reveal", gameHandler.RevealMine)
+				mines.POST("/cashout", gameHandler.CashoutMines)
+			}
+
+			dice := games.Group("/dice")
+			{
+				dice.POST("/play", gameHandler.PlayDice)
+			}
+		}
 	}
 
 	port := cfg.Port

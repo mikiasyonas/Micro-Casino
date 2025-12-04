@@ -3,6 +3,7 @@ package middleware
 import (
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -36,6 +37,48 @@ func AuthMiddleware(jwtService *services.JWTService) gin.HandlerFunc {
 
 		c.Set("user_id", claims.UserID)
 		c.Set("session_id", claims.SessionID)
+
+		c.Next()
+	}
+}
+
+func RateLimitMiddleware(redisService *services.RedisService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID, exists := c.Get("user_id")
+		if !exists {
+			c.Next()
+			return
+		}
+
+		path := c.Request.URL.Path
+
+		var limit int
+		var window time.Duration
+
+		switch {
+		case strings.Contains(path, "/games/bet"):
+			limit = 30 // 30 bets per minute
+			window = time.Minute
+		case strings.Contains(path, "/games/cashout"):
+			limit = 60 // 60 cashouts per minute
+			window = time.Minute
+		case strings.Contains(path, "/games/mines/reveal"):
+			limit = 120 // 120 reveals per minute
+			window = time.Minute
+		default:
+			c.Next()
+			return
+		}
+
+		allowed, err := redisService.CheckRateLimit(userID.(int64), path, limit, window)
+		if err != nil || !allowed {
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"error":       "Rate limit exceeded",
+				"retry_after": window.Seconds(),
+			})
+			c.Abort()
+			return
+		}
 
 		c.Next()
 	}
