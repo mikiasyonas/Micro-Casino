@@ -10,6 +10,10 @@ type TelegramUser struct {
 	LanguageCode string `json:"language_code,omitempty"`
 	IsPremium    bool   `json:"is_premium,omitempty"`
 	PhotoURL     string `json:"photo_url,omitempty"`
+
+	Wallet     *Wallet `json:"wallet,omitempty"`
+	IsVerified bool    `json:"is_verified"`
+	DailyLimit float64 `json:"daily_limit"`
 }
 
 type UserSession struct {
