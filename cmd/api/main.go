@@ -33,6 +33,7 @@ func main() {
 
 	gameEngine := services.NewGameEngine(redisService)
 	wsHandler := handlers.NewWebSocketHandler(gameEngine)
+	gameEngine.SetBroadcaster(wsHandler)
 
 	go func() {
 		ticker := time.NewTicker(5 * time.Minute)

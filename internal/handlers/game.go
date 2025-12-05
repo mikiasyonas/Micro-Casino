@@ -36,6 +36,17 @@ func (h *GameHandler) PlaceBet(c *gin.Context) {
 		return
 	}
 
+	// Rate Limit: 30 bets per minute
+	allowed, err := h.redisService.CheckRateLimit(userID, "bet", 30, 1*time.Minute)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Rate limit check failed"})
+		return
+	}
+	if !allowed {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "Too many bets. Please wait."})
+		return
+	}
+
 	if req.Amount < 1 {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": "Minimum bet is 1 cent",
@@ -85,6 +96,17 @@ func (h *GameHandler) Cashout(c *gin.Context) {
 			"error":   "Invalid request",
 			"details": err.Error(),
 		})
+		return
+	}
+
+	// Rate Limit: 60 cashouts per minute
+	allowed, err := h.redisService.CheckRateLimit(userID, "cashout", 60, 1*time.Minute)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Rate limit check failed"})
+		return
+	}
+	if !allowed {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "Too many cashouts. Please wait."})
 		return
 	}
 
@@ -302,6 +324,17 @@ func (h *GameHandler) RevealMine(c *gin.Context) {
 		return
 	}
 
+	// Rate Limit: 120 reveals per minute
+	allowed, err := h.redisService.CheckRateLimit(userID, "reveal", 120, 1*time.Minute)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Rate limit check failed"})
+		return
+	}
+	if !allowed {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "Too many reveals. Please wait."})
+		return
+	}
+
 	session, err := h.redisService.GetGameSession(req.GameID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{
@@ -432,17 +465,26 @@ func (h *GameHandler) RevealMine(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
-		"result": gin.H{
-			"game_id":        session.ID,
-			"is_mine":        isMine,
-			"position":       req.Position,
-			"multiplier":     multiplier,
-			"revealed":       revealed,
-			"revealed_count": revealedCount,
-			"mines_left":     len(minePositions),
-			"game_over":      isMine,
-			"status":         session.Status,
-		},
+	response := gin.H{
+		"game_id":        session.ID,
+		"is_mine":        isMine,
+		"position":       req.Position,
+		"multiplier":     multiplier,
+		"revealed":       revealed,
+		"revealed_count": revealedCount,
+		"mines_left":     len(minePositions),
+		"game_over":      isMine,
+		"status":         session.Status,
+	}
+
+	if isMine {
+		response["mine_positions"] = minePositions
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"result":  response,
+	})
 	})
 }
 
@@ -586,164 +628,45 @@ func (h *GameHandler) PlayDice(c *gin.Context) {
 		return
 	}
 
-	// Validate target
-	if req.Target < 1 || req.Target > 95 {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Target must be between 1 and 95",
-		})
+	// Rate Limit: 30 bets per minute (same as PlaceBet)
+	allowed, err := h.redisService.CheckRateLimit(userID, "bet", 30, 1*time.Minute)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Rate limit check failed"})
+		return
+	}
+	if !allowed {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "Too many bets. Please wait."})
 		return
 	}
 
-	session, err := h.redisService.GetGameSession(req.GameID)
+	result, err := h.gameEngine.PlayDice(c.Request.Context(), userID, req.GameID, req.Target, req.Over)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"error":   "Game not found",
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "Failed to play dice",
 			"details": err.Error(),
 		})
 		return
-	}
-
-	if session.UserID != userID {
-		c.JSON(http.StatusForbidden, gin.H{
-			"error": "You don't own this game",
-		})
-		return
-	}
-
-	if session.Status != "active" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error":  "Game is not active",
-			"status": session.Status,
-		})
-		return
-	}
-
-	metadata := session.Metadata
-
-	rollRaw, ok := metadata["roll"]
-	if !ok {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Roll data missing",
-		})
-		return
-	}
-
-	roll := int(rollRaw.(float64))
-
-	if played, ok := metadata["played"]; ok && played.(bool) {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Dice already rolled for this game",
-		})
-		return
-	}
-
-	win := false
-	if req.Over {
-		win = roll > req.Target
-	} else {
-		win = roll < req.Target
-	}
-
-	probability := 0.0
-	if req.Over {
-		probability = float64(100-req.Target) / 100.0
-	} else {
-		probability = float64(req.Target) / 100.0
-	}
-
-	multiplier := (0.99 / probability)
-
-	if multiplier > 9900.0 {
-		multiplier = 9900.0
-	}
-
-	payout := 0.0
-	if win {
-		payout = session.BetAmount * multiplier
-	}
-
-	session.Status = "completed"
-	session.Multiplier = multiplier
-	session.CashoutAt = multiplier
-	session.EndedAt = time.Now()
-
-	metadata["played"] = true
-	metadata["target"] = req.Target
-	metadata["over"] = req.Over
-	metadata["win"] = win
-	metadata["payout"] = payout
-	session.Metadata = metadata
-
-	if win {
-		err = h.redisService.ReleaseBalanceFromGame(
-			userID,
-			session.BetAmount,
-			true,                     // won
-			payout-session.BetAmount, // net winnings
-		)
-	} else {
-		err = h.redisService.ReleaseBalanceFromGame(
-			userID,
-			session.BetAmount,
-			false, // lost
-			0,     // no winnings
-		)
-	}
-
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "Failed to process dice result",
-			"details": err.Error(),
-		})
-		return
-	}
-
-	h.redisService.UpdateGameSession(session)
-	h.redisService.CompleteGameSession(userID, req.GameID)
-
-	txType := models.TransactionTypeBet
-	description := fmt.Sprintf("Lost dice game: roll %d vs target %d (over=%v)",
-		roll, req.Target, req.Over)
-
-	if win {
-		txType = models.TransactionTypeWin
-		description = fmt.Sprintf("Won dice game: roll %d vs target %d (over=%v) at %.2fx",
-			roll, req.Target, req.Over, multiplier)
 	}
 
 	wallet, err := h.redisService.GetWallet(userID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error":  "Wallet error active",
-			"status": session.Status,
-		})
+		// Should not happen as PlayDice succeeds
+		log.Printf("Failed to get wallet after dice play: %v", err)
 	}
-
-	h.redisService.SaveTransaction(&models.Transaction{
-		ID:            generateTransactionID(),
-		UserID:        userID,
-		Type:          txType,
-		Amount:        payout,
-		BalanceBefore: wallet.Balance,
-		BalanceAfter:  0,
-		GameID:        session.ID,
-		Description:   description,
-		CreatedAt:     time.Now(),
-	})
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"result": gin.H{
-			"game_id":     session.ID,
-			"roll":        roll,
-			"target":      req.Target,
+			"game_id":     result.GameID,
+			"roll":        result.Roll,
+			"target":      result.Target,
 			"over":        req.Over,
-			"win":         win,
-			"multiplier":  multiplier,
-			"bet_amount":  session.BetAmount,
-			"payout":      payout,
+			"win":         result.Win,
+			"multiplier":  result.Multiplier,
+			"bet_amount":  0, // TODO: Add BetAmount to response model if needed by frontend
+			"payout":      result.Payout,
 			"new_balance": wallet.Balance,
-			"status":      session.Status,
+			"status":      "completed",
 		},
 	})
 }

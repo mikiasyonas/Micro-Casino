@@ -20,6 +20,7 @@ type GameEngine struct {
 	redisService *RedisService
 	serverSeed   string
 	activeGames  map[string]*GameInstance
+	broadcaster  Broadcaster
 }
 
 type GameInstance struct {
@@ -36,6 +37,10 @@ func NewGameEngine(redisService *RedisService) *GameEngine {
 		serverSeed:   generateServerSeed(),
 		activeGames:  make(map[string]*GameInstance),
 	}
+}
+
+func (ge *GameEngine) SetBroadcaster(b Broadcaster) {
+	ge.broadcaster = b
 }
 
 func generateServerSeed() string {
@@ -240,8 +245,8 @@ func (ge *GameEngine) startGame(session *models.GameSession) error {
 		go ge.runCrashGame(gameInstance)
 	case models.GameTypeMines:
 		go ge.runMinesGame(gameInstance)
-	// case models.GameTypeDice:
-	// 	go ge.runDiceGame(gameInstance)
+	case models.GameTypeDice:
+		go ge.runDiceGame(gameInstance)
 	default:
 		return fmt.Errorf("unsupported game type: %s", session.GameType)
 	}
@@ -261,6 +266,10 @@ func (ge *GameEngine) runCrashGame(instance *GameInstance) {
 
 			ge.redisService.UpdateGameSession(instance.Session)
 
+			if ge.broadcaster != nil {
+				ge.broadcaster.BroadcastGameUpdate(instance.Session.ID, instance.Session.Multiplier)
+			}
+
 			if instance.Session.Multiplier >= instance.Session.CrashPoint {
 				ge.handleCrash(instance)
 				return
@@ -279,6 +288,10 @@ func (ge *GameEngine) handleCrash(instance *GameInstance) {
 
 	ge.redisService.UpdateGameSession(instance.Session)
 	ge.redisService.CompleteGameSession(instance.Session.UserID, instance.Session.ID)
+
+	if ge.broadcaster != nil {
+		ge.broadcaster.BroadcastGameCrash(instance.Session.ID, instance.Session.CrashPoint)
+	}
 
 	ge.redisService.ReleaseBalanceFromGame(
 		instance.Session.UserID,
@@ -494,6 +507,129 @@ func (ge *GameEngine) generateDiceRoll(clientSeed string, nonce int64) int {
 
 	val := int(hash[0])
 	return val % 100
+}
+
+func (ge *GameEngine) PlayDice(ctx context.Context, userID int64, gameID string, target int, over bool) (*models.DicePlayResponse, error) {
+	instance, exists := ge.activeGames[gameID]
+	if !exists {
+		// Check if it's in Redis but not active (already played)
+		session, err := ge.redisService.GetGameSession(gameID)
+		if err != nil {
+			return nil, fmt.Errorf("game not found")
+		}
+		if session.Status != "active" {
+			return nil, fmt.Errorf("game already completed")
+		}
+		// If active in Redis but not in memory, it might be a restart or error.
+		// For now, fail.
+		return nil, fmt.Errorf("game session lost")
+	}
+
+	if instance.Session.UserID != userID {
+		return nil, fmt.Errorf("unauthorized")
+	}
+
+	// Stop the timeout timer
+	select {
+	case instance.StopChan <- struct{}{}:
+	default:
+	}
+
+	session := instance.Session
+	metadata := session.Metadata
+
+	rollRaw, ok := metadata["roll"]
+	if !ok {
+		return nil, fmt.Errorf("roll data missing")
+	}
+	roll := int(rollRaw.(float64))
+
+	win := false
+	if over {
+		win = roll > target
+	} else {
+		win = roll < target
+	}
+
+	probability := 0.0
+	if over {
+		probability = float64(100-target) / 100.0
+	} else {
+		probability = float64(target) / 100.0
+	}
+
+	multiplier := (0.99 / probability)
+	if multiplier > 9900.0 {
+		multiplier = 9900.0
+	}
+
+	payout := 0.0
+	if win {
+		payout = session.BetAmount * multiplier
+	}
+
+	session.Status = "completed"
+	session.Multiplier = multiplier
+	session.CashoutAt = multiplier
+	session.EndedAt = time.Now()
+
+	metadata["played"] = true
+	metadata["target"] = target
+	metadata["over"] = over
+	metadata["win"] = win
+	metadata["payout"] = payout
+	session.Metadata = metadata
+
+	if win {
+		ge.redisService.ReleaseBalanceFromGame(userID, session.BetAmount, true, payout-session.BetAmount)
+	} else {
+		ge.redisService.ReleaseBalanceFromGame(userID, session.BetAmount, false, 0)
+	}
+
+	ge.redisService.UpdateGameSession(session)
+	ge.redisService.CompleteGameSession(userID, gameID)
+	ge.recordTransaction(session, win, payout)
+
+	delete(ge.activeGames, gameID)
+
+	return &models.DicePlayResponse{
+		GameID:     gameID,
+		Roll:       roll,
+		Target:     target,
+		Win:        win,
+		Multiplier: multiplier,
+		Payout:     payout,
+	}, nil
+}
+
+func (ge *GameEngine) runDiceGame(instance *GameInstance) {
+	// Wait for 1 minute for user to play
+	timer := time.NewTimer(1 * time.Minute)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		// Timeout - Refund
+		ge.redisService.ReleaseBalanceFromGame(
+			instance.Session.UserID,
+			instance.Session.BetAmount,
+			true, // Treat as win to refund
+			0,    // 0 winnings means just return bet?
+			// Wait, ReleaseBalanceFromGame(..., won, winnings)
+			// If won=true, it adds betAmount + winnings.
+			// So winnings=0 means adds betAmount. Correct.
+		)
+		
+		instance.Session.Status = "refunded"
+		instance.Session.EndedAt = time.Now()
+		ge.redisService.UpdateGameSession(instance.Session)
+		ge.redisService.CompleteGameSession(instance.Session.UserID, instance.Session.ID)
+		
+		delete(ge.activeGames, instance.Session.ID)
+		
+	case <-instance.StopChan:
+		// Game played, do nothing (handled in PlayDice)
+	}
 }
 
 func (ge *GameEngine) GetActiveGame(gameID string) (*GameInstance, bool) {
