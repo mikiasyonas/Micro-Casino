@@ -18,8 +18,9 @@ var upgrader = websocket.Upgrader{
 }
 
 type WebSocketHandler struct {
-	gameEngine *services.GameEngine
-	hub        *WebSocketHub
+	gameEngine   *services.GameEngine
+	redisService *services.RedisService
+	hub          *WebSocketHub
 }
 
 type WebSocketHub struct {
@@ -41,7 +42,7 @@ type Message struct {
 	Data   interface{} `json:"data"`
 }
 
-func NewWebSocketHandler(gameEngine *services.GameEngine) *WebSocketHandler {
+func NewWebSocketHandler(gameEngine *services.GameEngine, redisService *services.RedisService) *WebSocketHandler {
 	hub := &WebSocketHub{
 		clients:    make(map[int64]*websocket.Conn),
 		register:   make(chan *Client),
@@ -52,8 +53,9 @@ func NewWebSocketHandler(gameEngine *services.GameEngine) *WebSocketHandler {
 	go hub.run()
 
 	return &WebSocketHandler{
-		gameEngine: gameEngine,
-		hub:        hub,
+		gameEngine:   gameEngine,
+		redisService: redisService,
+		hub:          hub,
 	}
 }
 
@@ -112,17 +114,20 @@ func (h *WebSocketHandler) handleMessage(client *Client, msg *Message) {
 }
 
 func (h *WebSocketHandler) sendBalance(client *Client) {
-	// Get balance from wallet
-	// wallet, err := h.redisService.GetWallet(client.UserID)
+	wallet, err := h.redisService.GetWallet(client.UserID)
+	if err != nil {
+		log.Printf("Failed to get wallet for WS: %v", err)
+		return
+	}
 
 	msg := Message{
 		Type: "BALANCE_UPDATE",
 		Data: gin.H{
-			"balance":       10000,
-			"locked":        0,
-			"available":     10000,
-			"total_wagered": 0,
-			"total_won":     0,
+			"balance":       wallet.Balance,
+			"locked":        wallet.LockedBalance,
+			"available":     wallet.Balance - wallet.LockedBalance,
+			"total_wagered": wallet.TotalWagered,
+			"total_won":     wallet.TotalWon,
 		},
 	}
 

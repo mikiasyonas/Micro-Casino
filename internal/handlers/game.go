@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -140,7 +141,7 @@ func (h *GameHandler) GetBalance(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"balance": gin.H{
-			"available":     wallet.Balance - wallet.LockedBalance,
+			"available":     wallet.Balance,
 			"locked":        wallet.LockedBalance,
 			"total":         wallet.Balance,
 			"total_wagered": wallet.TotalWagered,
@@ -460,11 +461,8 @@ func (h *GameHandler) RevealMine(c *gin.Context) {
 		session.Multiplier = multiplier
 		session.Metadata = metadata
 	}
-
 	h.redisService.UpdateGameSession(session)
 
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
 	response := gin.H{
 		"game_id":        session.ID,
 		"is_mine":        isMine,
@@ -484,7 +482,6 @@ func (h *GameHandler) RevealMine(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"result":  response,
-	})
 	})
 }
 
@@ -563,7 +560,7 @@ func (h *GameHandler) CashoutMines(c *gin.Context) {
 		userID,
 		session.BetAmount,
 		true,                       // won
-		winnings-session.BetAmount, // net winnings
+		winnings+session.BetAmount, // net winnings
 	)
 
 	if err != nil {

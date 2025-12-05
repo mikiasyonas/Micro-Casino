@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"math"
 	"math/big"
 	"math/rand"
@@ -537,12 +538,26 @@ func (ge *GameEngine) PlayDice(ctx context.Context, userID int64, gameID string,
 
 	session := instance.Session
 	metadata := session.Metadata
+	log.Println(metadata)
 
 	rollRaw, ok := metadata["roll"]
 	if !ok {
 		return nil, fmt.Errorf("roll data missing")
 	}
-	roll := int(rollRaw.(float64))
+
+	var roll int
+	switch v := rollRaw.(type) {
+	case float64:
+		roll = int(v)
+	case int:
+		roll = v
+	case int64:
+		roll = int(v)
+	case uint64:
+		roll = int(v)
+	default:
+		return nil, fmt.Errorf("unexpected roll type: %T", rollRaw)
+	}
 
 	win := false
 	if over {
@@ -581,7 +596,7 @@ func (ge *GameEngine) PlayDice(ctx context.Context, userID int64, gameID string,
 	session.Metadata = metadata
 
 	if win {
-		ge.redisService.ReleaseBalanceFromGame(userID, session.BetAmount, true, payout-session.BetAmount)
+		ge.redisService.ReleaseBalanceFromGame(userID, session.BetAmount, true, payout)
 	} else {
 		ge.redisService.ReleaseBalanceFromGame(userID, session.BetAmount, false, 0)
 	}
@@ -591,6 +606,15 @@ func (ge *GameEngine) PlayDice(ctx context.Context, userID int64, gameID string,
 	ge.recordTransaction(session, win, payout)
 
 	delete(ge.activeGames, gameID)
+
+	log.Println(&models.DicePlayResponse{
+		GameID:     gameID,
+		Roll:       roll,
+		Target:     target,
+		Win:        win,
+		Multiplier: multiplier,
+		Payout:     payout,
+	})
 
 	return &models.DicePlayResponse{
 		GameID:     gameID,
@@ -619,14 +643,14 @@ func (ge *GameEngine) runDiceGame(instance *GameInstance) {
 			// If won=true, it adds betAmount + winnings.
 			// So winnings=0 means adds betAmount. Correct.
 		)
-		
+
 		instance.Session.Status = "refunded"
 		instance.Session.EndedAt = time.Now()
 		ge.redisService.UpdateGameSession(instance.Session)
 		ge.redisService.CompleteGameSession(instance.Session.UserID, instance.Session.ID)
-		
+
 		delete(ge.activeGames, instance.Session.ID)
-		
+
 	case <-instance.StopChan:
 		// Game played, do nothing (handled in PlayDice)
 	}

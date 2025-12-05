@@ -192,74 +192,114 @@ func (s *RedisService) UpdateWalletBalance(userID int64, amount float64) error {
 	return s.client.Set(s.ctx, key, updatedData, 0).Err()
 }
 
-var lockBalanceScript = redis.NewScript(`
-	local key = KEYS[1]
-	local amount = tonumber(ARGV[1])
-	
-	local data = redis.call("GET", key)
-	if not data then
-		return redis.error_reply("wallet not found")
-	end
-	
-	local wallet = cjson.decode(data)
-	
-	if wallet.balance < amount then
-		return redis.error_reply("insufficient balance")
-	end
-	
-	wallet.balance = wallet.balance - amount
-	wallet.locked_balance = wallet.locked_balance + amount
-	wallet.total_wagered = wallet.total_wagered + amount
-	
-	local updated = cjson.encode(wallet)
-	redis.call("SET", key, updated)
-	
-	return "OK"
-`)
-
 func (s *RedisService) LockBalanceForGame(userID int64, amount float64) error {
 	key := fmt.Sprintf("wallet:%d", userID)
-	return lockBalanceScript.Run(s.ctx, s.client, []string{key}, amount).Err()
-}
 
-var releaseBalanceScript = redis.NewScript(`
-	local key = KEYS[1]
-	local amount = tonumber(ARGV[1])
-	local won = ARGV[2] == "true"
-	local winnings = tonumber(ARGV[3])
-	
-	local data = redis.call("GET", key)
-	if not data then
-		return redis.error_reply("wallet not found")
-	end
-	
-	local wallet = cjson.decode(data)
-	
-	if wallet.locked_balance < amount then
-		-- In case of inconsistency, we just reset locked_balance to 0 or handle gracefully
-		-- For strictness, we error, but in production we might want to auto-correct
-		-- Let's just proceed but log internally if we could
-	end
-	
-	wallet.locked_balance = wallet.locked_balance - amount
-	if wallet.locked_balance < 0 then
-		wallet.locked_balance = 0
-	end
-	
-	if won then
-		wallet.balance = wallet.balance + winnings
-		wallet.total_won = wallet.total_won + winnings
-	end
-	
-	local updated = cjson.encode(wallet)
-	redis.call("SET", key, updated)
-	
-	return "OK"
-`)
+	// Retry a few times in case of transaction conflicts
+	for i := 0; i < 3; i++ {
+		err := s.client.Watch(s.ctx, func(tx *redis.Tx) error {
+			data, err := tx.Get(s.ctx, key).Result()
+			if err == redis.Nil {
+				return fmt.Errorf("wallet not found")
+			}
+			if err != nil {
+				return err
+			}
+
+			var wallet models.Wallet
+			if err := json.Unmarshal([]byte(data), &wallet); err != nil {
+				return fmt.Errorf("failed to unmarshal wallet: %v", err)
+			}
+
+			if wallet.Balance < amount {
+				return fmt.Errorf("insufficient balance")
+			}
+
+			wallet.Balance -= amount
+			wallet.LockedBalance += amount
+			wallet.TotalWagered += amount
+
+			updated, err := json.Marshal(wallet)
+			if err != nil {
+				return fmt.Errorf("failed to marshal updated wallet: %v", err)
+			}
+
+			_, err = tx.TxPipelined(s.ctx, func(pipe redis.Pipeliner) error {
+				pipe.Set(s.ctx, key, updated, 0)
+				return nil
+			})
+			return err
+		}, key)
+
+		if err == nil {
+			return nil
+		}
+		// retry on optimistic lock failure
+		if err == redis.TxFailedErr {
+			continue
+		}
+		return err
+	}
+
+	return fmt.Errorf("failed to lock balance: transaction conflict")
+}
 
 func (s *RedisService) ReleaseBalanceFromGame(userID int64, amount float64, won bool, winnings float64) error {
 	key := fmt.Sprintf("wallet:%d", userID)
-	return releaseBalanceScript.Run(s.ctx, s.client, []string{key}, amount, won, winnings).Err()
+
+	for i := 0; i < 3; i++ {
+		err := s.client.Watch(s.ctx, func(tx *redis.Tx) error {
+			data, err := tx.Get(s.ctx, key).Result()
+			if err == redis.Nil {
+				return fmt.Errorf("wallet not found")
+			}
+			if err != nil {
+				return err
+			}
+
+			var wallet models.Wallet
+			if err := json.Unmarshal([]byte(data), &wallet); err != nil {
+				return fmt.Errorf("failed to unmarshal wallet: %v", err)
+			}
+
+			// If locked balance is less than requested amount, release what we have to avoid negative locked balance
+			releaseAmt := amount
+			if wallet.LockedBalance < releaseAmt {
+				releaseAmt = wallet.LockedBalance
+			}
+
+			wallet.LockedBalance -= releaseAmt
+			if wallet.LockedBalance < 0 {
+				wallet.LockedBalance = 0
+			}
+
+			if won {
+				wallet.Balance += winnings
+				wallet.TotalWon += winnings
+			}
+
+			updated, err := json.Marshal(wallet)
+			if err != nil {
+				return fmt.Errorf("failed to marshal updated wallet: %v", err)
+			}
+
+			_, err = tx.TxPipelined(s.ctx, func(pipe redis.Pipeliner) error {
+				pipe.Set(s.ctx, key, updated, 0)
+				return nil
+			})
+			return err
+		}, key)
+
+		if err == nil {
+			return nil
+		}
+		if err == redis.TxFailedErr {
+			continue
+		}
+		return err
+	}
+
+	return fmt.Errorf("failed to release balance: transaction conflict")
 }
 
 func (s *RedisService) SaveGameSession(session *models.GameSession) error {

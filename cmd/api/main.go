@@ -32,7 +32,7 @@ func main() {
 	jwtService := services.NewJWTService(cfg)
 
 	gameEngine := services.NewGameEngine(redisService)
-	wsHandler := handlers.NewWebSocketHandler(gameEngine)
+	wsHandler := handlers.NewWebSocketHandler(gameEngine, redisService)
 	gameEngine.SetBroadcaster(wsHandler)
 
 	go func() {
