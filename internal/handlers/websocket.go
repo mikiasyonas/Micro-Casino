@@ -190,6 +190,7 @@ func (h *WebSocketHandler) BroadcastGameUpdate(gameID string, multiplier float64
 		Type:   "GAME_UPDATE",
 		GameID: gameID,
 		Data: gin.H{
+			"game_id":    gameID,
 			"multiplier": multiplier,
 			"timestamp":  time.Now().Unix(),
 		},
@@ -203,6 +204,7 @@ func (h *WebSocketHandler) BroadcastGameCrash(gameID string, crashPoint float64)
 		Type:   "GAME_CRASH",
 		GameID: gameID,
 		Data: gin.H{
+			"game_id":     gameID,
 			"crash_point": crashPoint,
 			"timestamp":   time.Now().Unix(),
 		},

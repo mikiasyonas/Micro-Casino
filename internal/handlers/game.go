@@ -550,7 +550,6 @@ func (h *GameHandler) CashoutMines(c *gin.Context) {
 
 	multiplier := multipliers[revealedCount]
 	winnings := session.BetAmount * multiplier
-
 	session.Status = "cashed_out"
 	session.CashoutAt = multiplier
 	session.Multiplier = multiplier
@@ -559,8 +558,8 @@ func (h *GameHandler) CashoutMines(c *gin.Context) {
 	err = h.redisService.ReleaseBalanceFromGame(
 		userID,
 		session.BetAmount,
-		true,                       // won
-		winnings+session.BetAmount, // net winnings
+		true,     // won
+		winnings, // net winnings
 	)
 
 	if err != nil {

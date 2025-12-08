@@ -349,8 +349,8 @@ func (ge *GameEngine) Cashout(ctx context.Context, userID int64, gameID string) 
 	err = ge.redisService.ReleaseBalanceFromGame(
 		userID,
 		instance.Session.BetAmount,
-		true,                                // won
-		winnings-instance.Session.BetAmount, // net winnings
+		true,     // won
+		winnings, // net winnings
 	)
 
 	if err != nil {
