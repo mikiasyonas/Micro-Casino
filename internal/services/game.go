@@ -57,7 +57,7 @@ func (ge *GameEngine) GetServerHash() string {
 	return hex.EncodeToString(hash[:])
 }
 
-func (ge *GameEngine) GetServerSpeed() string {
+func (ge *GameEngine) GetServerSeed() string {
 	return ge.serverSeed
 }
 

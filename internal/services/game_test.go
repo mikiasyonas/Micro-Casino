@@ -54,7 +54,7 @@ func TestGameEngine(t *testing.T) {
 
 	crashPoint, _, err := gameEngine.VerifyGameResult(
 		session.ClientSeed,
-		gameEngine.GetServerSpeed(),
+		gameEngine.GetServerSeed(),
 		session.Nonce,
 	)
 
